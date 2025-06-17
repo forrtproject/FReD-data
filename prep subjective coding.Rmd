@@ -1,0 +1,197 @@
+---
+title: "Untitled"
+author: "Lukas Wallrich"
+date: "2025-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(FReD)
+fred_validated_path <- file.choose()
+fred_validated <- openxlsx::read.xlsx(fred_validated_path, sheet = "COS coding", startRow = 2)
+
+# filter for validated - chosen entries
+fred_validated <- fred_validated[fred_validated$status == "validated - chosen", ]
+
+```
+
+```{r}
+fred_validated %>%
+  mutate(tt_o = ifelse(es_type_o == "test statistic", str_sub(str_trim(es_value_o), 1, 2), NA), 
+         tt_r = ifelse(es_type_r == "test statistic", str_sub(str_trim(es_value_r), 1, 2), NA)) %>%
+  select(tt_o, tt_r) %>%
+  unlist() %>%
+  na.omit() %>% 
+  tibble(tt = .) %>%
+  count(tt, sort = T)
+```
+
+
+## List of studies for subjective coding
+
+```{r cars}
+# convert original effect sizes
+fred_validated$r_o <- convert_effect_sizes(es_values = fred_validated$es_value_o, es_types = fred_validated$es_type_o)  
+
+# convert replication effect sizes
+fred_validated$r_r <- convert_effect_sizes(es_values = fred_validated$es_value_r, es_types = fred_validated$es_type_r)
+
+# directional effects
+dir_types <- c("d", "r", "OR", "phi", "b (unstd)", "beta (std)", "beta", 
+               "Mean difference", "percentage difference", "hedges' g",
+               "median difference")
+
+fred_validated <- fred_validated %>% 
+  mutate(es_type_o = str_trim(es_type_o),
+         es_type_r = str_trim(es_type_r))
+
+fred_validated <- fred_validated %>% mutate(
+  p_val_temp_r = coalesce(as.numeric(pval_value_r), FReD:::p_from_r(r_r, as.numeric(n_r))),
+   p_val_temp_o = coalesce(as.numeric(pval_value_o), FReD:::p_from_r(r_o, as.numeric(n_o))),
+  convertible = 
+    (es_type_o %in% dir_types | str_detect(es_value_o, "^t|^Z|^z")) & 
+       (es_type_r %in% dir_types | str_detect(es_value_r, "^t|^Z|^z")),
+  replication_success = case_when(
+    !convertible |  p_val_temp_o > .05 | 
+      (p_val_temp_o == .05 & pval_type_o == "g (>)") | is.na(es_value_o) |
+      is.na(es_value_r) | is.na(p_val_temp_r) | is.na(p_val_temp_o) ~ NA,
+    (p_val_temp_r < .05 | (p_val_temp_r == .05 & pval_type_r == "l (<)")) & 
+    sign(if_else(!is.na(r_r), r_r, as.numeric(es_value_r))) == 
+    sign(if_else(!is.na(r_o), r_o, as.numeric(es_value_o))) ~ TRUE,
+    .default = FALSE
+  )) %>% 
+  select(-convertible, p_val_temp_r, p_val_temp_o)
+```
+
+
+```{r cars}
+missing_p <- fred_validated %>% 
+  filter(is.na(as.numeric(pval_value_r)) | is.na(as.numeric(pval_value_o))) %>% 
+  mutate(check_p_o = is.na(as.numeric(pval_value_o)), 
+         check_p_r = is.na(as.numeric(pval_value_r))) %>% 
+  select(id, check_p_o, check_p_r)
+
+convert_es <- fred_validated %>% 
+  mutate( convertible_o = es_type_o %in% dir_types | str_detect(es_value_o, "^t|^Z|^z"),
+    convertible_r = es_type_r %in% dir_types | str_detect(es_value_r, "^t|^Z|^z"),
+    #Exclude F(>=2, ...) as they cannot be converted into single directional effect size
+    df1_o = str_extract(es_value_o, "^F\\((\\d)", group = 1) %>% as.numeric() %>% coalesce(0),
+    df1_r = str_extract(es_value_r, "^F\\((\\d)", group = 1) %>% as.numeric()  %>% coalesce(0),
+    #Exclude X2(>=2, ...) as they cannot be converted into a single directional effect size
+    #Check if correct df is 1 or 2
+    ) %>% 
+  filter((!convertible_o & df1_o < 2) | (!convertible_r & df1_r < 2)) %>% 
+  transmute(id, code_es_o = !convertible_o, code_es_r = !convertible_r)
+
+
+coding <- missing_p %>% full_join(convert_es) %>% left_join(fred_validated) %>% select(id, claim_text_o, doi_o, file_r, link_r, doi_r, file_r, link_r, code_es_o, code_es_r, check_p_o, check_p_r, es_value_o, es_type_o, es_repr_o, pval_value_o, pval_type_o, pval_tails_o, es_value_r, es_type_r, es_repr_r, pval_value_r, pval_type_r, pval_tails_r) 
+```
+
+
+
+
+
+```{r cars}
+subj <- fred_validated %>% filter(is.na(replication_success)) %>% 
+  select(entry, ref_o, doi_o, ref_r, url_r, doi_r) %>% 
+  distinct()
+
+subj$abstract_r <- subj$doi_r %>% 
+  map_chr(function(x) {
+    if (is.na(x)) {
+      return(NA_character_)
+    }
+    possibly(rcrossref::cr_abstract, otherwise = NA_character_)(x) %>% unlist()
+  })
+
+
+# Auto-code
+
+subj$auto_code <- subj$abstract_r %>% 
+  map_chr(function(x) {
+    if (is.na(x)) {
+      return(NA_character_)
+    }
+    
+  })
+    
+    # Query ChatGPT to ask whether abstract indicates that replication was successful or unsuccessful
+    # and whether the replication was a direct or conceptual replication
+    
+
+library(ellmer)
+
+code_abstract <- function(x) {
+  
+  if (is.na(x) || x == "") {
+    return(list(success_rating = NA_character_, sucess_quote = NA_character_))
+  }
+  
+  chat <- chat_openai()
+  
+  chat$chat_structured(
+    paste0("The following abstract reports the result of a replication study. Identify whether it reports the replication as 'successful', 'failed', 'mixed' (some evidence of success and of failure), 'uninformative' (rare, e.g. if data collection failed) or 'statistically successful but highlighting fundamental flaws' (when the abstract explicitly states that the statistical results were confirmed, but that they do not support the hypothesis), or 'unclear' (when results of replication and original study are not direclty linked) - pick the single closest option. Return a direct quotation - the exact words - that support the classification you made, which would typically cover original and replication results. If you omit anything within the quote, mark clearly with [...]. If the abstract appears to refer to a paper reporting on multiple replications (of different original studies), preface the quote with [MULTIPLE?]", x),
+    type = type_object(
+      success_rating = type_string(),
+      sucess_quote = type_string()
+    )
+  )
+}
+
+identify_key_claim <- function(abstract, claims) {
+  
+  if (is.na(abstract) || abstract == "") {
+    return(list(key_claims = NA_character_, peripheral_claims = NA_character_))
+  }
+  
+  claims_text <- glue::glue("[{claims$id}] {claims $claim_text_o}") %>% paste(sep = "\n\n", collapse = "\n\n")
+  
+  chat <- chat_openai()
+  
+  chat$chat_structured(
+    paste0("We coded one or more claims made in an academic study. See the abstract and the list of claims below. Based on the abstract, identify whether the claims are central or peripheral to the message of the study. Return the claim IDs (provided in []) for each type, if any, as a comma-separated list. \n\nABSTRACT\n", abstract, "\n\nCLAIM(s)\n"), claims_text)
+    type = type_object(
+      key_claims = type_string(),
+      peripheral_claims = type_string()
+    )
+  )
+}
+
+
+
+coded_abstracts <- subj$abstract_r %>% 
+  map(code_abstract)
+
+subj <- bind_cols(subj, bind_rows(coded_abstracts))
+
+check_quote <- function(abstract, quote) {
+  quote <- quote %>% tolower() %>% str_squish()
+  abstract <- abstract %>% tolower() %>% str_squish()
+  quotes <-quote %>% str_split(("\\[\\.\\.\\.\\]|\\.\\.\\.")) %>% unlist() %>% str_trim()
+  data.frame(quote_detect = all(str_detect(abstract, fixed(quotes))), 
+             quote_dist = stringdist::stringdist(quote, abstract, "lcs")- (str_length(abstract) - str_length(quote)))
+}
+
+
+subj2 <- subj %>%
+  distinct(entry, .keep_all = TRUE) %>% 
+  rowwise() %>% 
+  mutate(check_quote(abstract_r, sucess_quote)) %>% 
+  ungroup() %>% 
+  mutate()
+
+
+
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
